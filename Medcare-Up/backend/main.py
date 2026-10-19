@@ -896,6 +896,45 @@ def send_to_lab_trigger(appointment_id: int, request: schemas.LabTestRequest, re
         
     return bill
 
+@app.get("/appointments/{appointment_id}/lab-tests", tags=["Doctor Operations"])
+def get_appointment_lab_tests(appointment_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    """Fetch all active/requested lab tests associated with a specific appointment"""
+    if current_user.role != "Doctor":
+        raise HTTPException(status_code=403, detail="Doctors only.")
+        
+    appointment = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found!")
+        
+    apt_date_start = datetime.combine(appointment.date, time.min)
+    apt_date_end = datetime.combine(appointment.date, time.max)
+    
+    lab_tests = db.query(models.LabTest).filter(
+        models.LabTest.patient_id == appointment.patient_id,
+        models.LabTest.received_time >= apt_date_start,
+        models.LabTest.received_time <= apt_date_end
+    ).all()
+    
+    return lab_tests
+
+@app.put("/lab-tests/{test_id}/cancel", tags=["Doctor Operations"])
+def cancel_lab_test(test_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    """Cancel a pending lab test request"""
+    if current_user.role != "Doctor":
+        raise HTTPException(status_code=403, detail="Doctors only.")
+
+    lab_test = db.query(models.LabTest).filter(models.LabTest.id == test_id).first()
+    if not lab_test:
+        raise HTTPException(status_code=404, detail="Lab test request not found!")
+
+    if lab_test.status != "Pending" and lab_test.status != "PENDING":
+        raise HTTPException(status_code=400, detail="Cannot cancel a test that is already collected or completed.")
+
+    db.delete(lab_test)
+    db.commit()
+
+    return {"message": "Lab test request cancelled successfully"}
+
 def check_ddi(medicines: list):
     """Send Structured data to easily render the Alert Box in the Frontend"""
     meds = set(medicines)
