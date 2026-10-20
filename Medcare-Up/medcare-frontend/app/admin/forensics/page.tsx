@@ -118,9 +118,9 @@ export default function DigitalForensicsPage() {
             <div className="border-2 border-dashed border-slate-700 rounded-2xl p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-red-500 transition-colors bg-slate-950/50"
                  onClick={() => document.getElementById('fileInput')?.click()}>
               <Upload size={40} className="text-slate-600 mb-4" />
-              <p className="text-xs font-bold text-slate-300 uppercase tracking-widest">Upload Leaked PNG Report</p>
+              <p className="text-xs font-bold text-slate-300 uppercase tracking-widest">Upload Leaked Report (.PNG or .PDF)</p>
               {/* Steganography only works for .png files in our backend */}
-              <input id="fileInput" type="file" className="hidden" onChange={handleFileChange} accept="image/png" />
+              <input id="fileInput" type="file" className="hidden" onChange={handleFileChange} accept=".png,.pdf,image/png,application/pdf" />
               <p className="text-[10px] text-sky-400 mt-3 font-mono font-bold">{file ? file.name : "Click to select file"}</p>
             </div>
             

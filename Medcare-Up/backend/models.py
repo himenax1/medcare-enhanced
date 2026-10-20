@@ -132,6 +132,7 @@ class Prescription(Base):
     patient_id = Column(Integer, ForeignKey("users.id"))
     doctor_note = Column(String, nullable=True)
     is_overridden = Column(Boolean, default=False)
+    override_reason = Column(String, nullable=True)
     created_at = Column(DateTime, default=get_lanka_time)
    
     medicines = relationship("PrescriptionItem", back_populates="prescription")

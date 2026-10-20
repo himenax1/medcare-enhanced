@@ -982,8 +982,10 @@ def create_prescription(appointment_id: int, prescription: schemas.PrescriptionC
         doctor_id=current_user.id, 
         patient_id=appointment.patient_id, 
         doctor_note=prescription.doctor_note, 
-        is_overridden=prescription.override_warning
+        is_overridden=prescription.override_warning,
+        override_reason=prescription.override_reason if prescription.override_warning else None  # <-- ADD THIS LINE
     )
+
     db.add(new_rx)
     db.commit()
     db.refresh(new_rx)
@@ -1010,18 +1012,21 @@ def create_prescription(appointment_id: int, prescription: schemas.PrescriptionC
         client_ip = req.client.host if req else "Unknown"
         
         if prescription.override_warning:
-            # 1. Combine data and generate a SHA-256 Hash
-            blockchain_data = f"Doctor_{current_user.id}|Patient_{appointment.patient_id}|OVERRIDE_DDI|{rx_num}|{get_lanka_time().isoformat()}"
+            # Extract the doctor's justification reason
+            reason_text = prescription.override_reason if prescription.override_reason else "No reason provided"
+            
+            # 1. Combine data and generate a SHA-256 Hash including the justification reason
+            blockchain_data = f"Doctor_{current_user.id}|Patient_{appointment.patient_id}|OVERRIDE_DDI|{rx_num}|{get_lanka_time().isoformat()}|Reason_{reason_text}"
             generated_hash = hashlib.sha256(blockchain_data.encode()).hexdigest()
             
-            # 2. 🚨 FIX: Send the generated Hash to the actual Sepolia Blockchain network
+            # 2. Send the generated Hash to the Sepolia Blockchain network
             blockchain_tx_id = push_hash_to_sepolia(generated_hash)
             
-            # 3. Save the Audit Log in our Database along with the TxID received from the Blockchain
-            log_details = f"DDI Bypassed. Internal Hash: {generated_hash} | Blockchain TxID: {blockchain_tx_id}"
+            # 3. Save the Audit Log in our Database along with the justification reason and TxID
+            log_details = f"DDI Bypassed. Reason: {reason_text} | Internal Hash: {generated_hash} | Blockchain TxID: {blockchain_tx_id}"
             log_doctor_action(db, current_user.id, "WARNING_OVERRIDDEN_BLOCKCHAIN", client_ip, log_details)
         else:
-            log_doctor_action(db, current_user.id, "PRESCRIBED", client_ip, f"Issued E-Prescription: {rx_num}")    
+            log_doctor_action(db, current_user.id, "PRESCRIBED", client_ip, f"Issued E-Prescription: {rx_num}")
         
     # 🟢 Retrieve the doctor's real name instead of ID to display to the patient
     doc_display_name = current_user.full_name if current_user.full_name else current_user.username
@@ -1180,7 +1185,7 @@ def get_my_health_vault_reports(db: Session = Depends(get_db), current_user: mod
         file_url = None
         # Search for the file in the Server folder only if the report is Completed
         if r.status == "Completed":
-            matches = glob.glob(f"uploaded_reports/{r.id}_*.png")
+            matches = glob.glob(f"uploaded_reports/{r.id}_*.*")
             if matches:
                 clean_path = matches[0].replace('\\', '/')
                 file_url = f"http://localhost:8000/{clean_path}"
@@ -1234,8 +1239,10 @@ def get_my_prescriptions(db: Session = Depends(get_db), current_user: models.Use
             },
             "doctor_name": doctor.full_name if doctor.full_name else doctor.username,
             "doctor_slmc": doctor.slmc_number,
-            "doctor_department": doctor.specialization, # 🚨 FIX 2: Send the missing Department field
+            "doctor_department": doctor.specialization,
             "doctor_note": rx.doctor_note,
+            "is_overridden": getattr(rx, 'is_overridden', False),       # <-- ADD THIS LINE
+            "override_reason": getattr(rx, 'override_reason', None),   # <-- ADD THIS LINE
             "medicines": items
         })
         
@@ -1360,28 +1367,35 @@ def download_secure_lab_report(test_id: int, req: Request, db: Session = Depends
     """Allow patient to securely download their Lab Report (Zero-Trust)"""
     if current_user.role != "Patient":
         raise HTTPException(status_code=403, detail="Patients only.")
-        
+
     lab_test = db.query(models.LabTest).filter(
         models.LabTest.id == test_id, 
         models.LabTest.patient_id == current_user.id
     ).first()
-    
+
     if not lab_test:
         raise HTTPException(status_code=404, detail="Report not found or access denied.")
     if lab_test.status != "Completed":
         raise HTTPException(status_code=400, detail="This report is not ready yet.")
-        
-    file_matches = glob.glob(f"uploaded_reports/{test_id}_*.png")
+
+    file_matches = glob.glob(f"uploaded_reports/{test_id}_*.*")
     if not file_matches:
         raise HTTPException(status_code=404, detail="File not found on the server.")
-        
-    file_path = file_matches[0]
+
+    file_path = max(file_matches, key=os.path.getmtime)
     file_name = os.path.basename(file_path)
-    
+    file_ext = file_name.split(".")[-1].lower()
+    media_type = "application/pdf" if file_ext == "pdf" else "image/png"
+
     client_ip = req.client.host if req else "Unknown"
     log_patient_action(db, current_user.id, "DOWNLOAD_REPORT", client_ip, f"Downloaded Lab Report ID: {test_id}")
-    
-    return FileResponse(path=file_path, filename=file_name, media_type="image/png")
+
+    return FileResponse(
+    path=file_path, 
+    filename=file_name, 
+    media_type=media_type,
+    headers={"Content-Disposition": f'attachment; filename="{file_name}"'}
+)
 @app.post("/bills/{bill_id}/pay", response_model=schemas.BillResponse, tags=["Admin Operations"])
 def pay_bill(bill_id: int, req: Request, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
     """PDF 5.4: Confirm payment (Blockchain removed)"""
@@ -1435,42 +1449,66 @@ def collect_sample(test_id: int, req: Request, db: Session = Depends(get_db), cu
 
 @app.post("/lab-tests/{test_id}/upload", tags=["Lab Technician"])
 async def upload_lab_report(test_id: int, request: Request, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    if current_user.role != "Lab Technician": raise HTTPException(status_code=403, detail="Lab Technicians only!")
+    if current_user.role != "Lab Technician": 
+        raise HTTPException(status_code=403, detail="Lab Technicians only!")
+        
     lab_test = db.query(models.LabTest).filter(models.LabTest.id == test_id).first()
-    if not lab_test: raise HTTPException(status_code=404, detail="This laboratory test cannot be found!")
-    if not file.filename.endswith(".png"): raise HTTPException(status_code=400, detail="Please upload only .png format files!")
-# 🚨 FIX 1: 100% Block modifying already completed reports (Overwrite protection) 
+    if not lab_test: 
+        raise HTTPException(status_code=404, detail="This laboratory test cannot be found!")
+    
+    file_ext = file.filename.split(".")[-1].lower()
+    if file_ext not in ["png", "pdf"]: 
+        raise HTTPException(status_code=400, detail="Please upload only .png or .pdf format files!")
+
     if lab_test.status == "Completed":
         raise HTTPException(status_code=400, detail="The report for this test has already been added to the system. It cannot be altered again!")
+        
     now = get_lanka_time()
     date_str = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M:%S")
     ip_address = request.client.host 
     handler_id = f"L-{current_user.id}" 
 
-    # 1. Steganography Payload
+    # 1. Forensic Payload Construction
     plain_text_data = f"Handler ID: {handler_id} | IP: {ip_address} | Date: {date_str} | Time: {time_str}"
     encrypted_data = cipher_suite.encrypt(plain_text_data.encode('utf-8')).decode('utf-8')
 
-# 🚨 FIX 2: Append a unique ID (Test ID) to the temporary file name to prevent Race Conditions
-    temp_path = f"uploaded_reports/temp_{lab_test.id}_{file.filename}"
-    # Create folder if it doesn't exist
     os.makedirs("uploaded_reports", exist_ok=True)
+    temp_path = f"uploaded_reports/temp_{lab_test.id}_{file.filename}"
+    final_filename = f"{lab_test.id}_{file.filename}"
+    final_path = f"uploaded_reports/{final_filename}"
+
     with open(temp_path, "wb") as buffer:
         buffer.write(await file.read())
 
-    final_path = f"uploaded_reports/{lab_test.id}_{file.filename}"
-# 🚨 FIX 2: Prevent Server Crash if a corrupted file is uploaded and send a clean error to the Frontend
     try:
-        secret_image = lsb.hide(temp_path, encrypted_data)
-        secret_image.save(final_path)
-        os.remove(temp_path)
+        if file_ext == "png":
+            # PNG LSB Steganography
+            secret_image = lsb.hide(temp_path, encrypted_data)
+            secret_image.save(final_path)
+        elif file_ext == "pdf":
+            # PDF Metadata Steganography
+            from pypdf import PdfReader, PdfWriter
+            reader = PdfReader(temp_path)
+            writer = PdfWriter()
+            for page in reader.pages:
+                writer.add_page(page)
+            writer.add_metadata({
+                "/ForensicSignature": encrypted_data,
+                "/Producer": f"MedCare Forensic Engine ({handler_id})"
+            })
+            with open(final_path, "wb") as f_out:
+                writer.write(f_out)
+
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-        raise HTTPException(status_code=400, detail="The Image File you uploaded is corrupted. Please provide only a valid .png image.")
+        raise HTTPException(status_code=400, detail=f"Failed to process file steganography: {str(e)}")
 
-    # 2. SHA-256 Hashing Process (Data required for the Patient's Verification Tool)
+    # 2. SHA-256 Hashing Process
     with open(final_path, "rb") as f:
         file_bytes = f.read()
         generated_hash = hashlib.sha256(file_bytes).hexdigest()
@@ -1481,9 +1519,8 @@ async def upload_lab_report(test_id: int, request: Request, file: UploadFile = F
     db.commit()
     db.refresh(lab_test)
 
-    log_lab_tech_action(db, current_user.id, "REPORT_UPLOADED", ip_address, f"Uploaded report for Test ID: {test_id} (Hash: {generated_hash})")
+    log_lab_tech_action(db, current_user.id, "REPORT_UPLOADED", ip_address, f"Uploaded {file_ext.upper()} report for Test ID: {test_id} (Hash: {generated_hash})")
     
-    # --- LAB REPORT NOTIFICATION TRIGGER ---
     notif = models.Notification(
         patient_id=lab_test.patient_id, 
         message="Your secure Lab Report is now available in your Health Vault.", 
@@ -1492,55 +1529,62 @@ async def upload_lab_report(test_id: int, request: Request, file: UploadFile = F
     )
     db.add(notif)
     db.commit()
-    return {"message": "Report uploaded successfully and securely!", "hash": generated_hash}
+    
+    return {"message": f"{file_ext.upper()} report uploaded and secured successfully!", "hash": generated_hash}
 
 # ---------------------------------------------------------
 # FORENSICS & VERIFICATION TOOLS
 # ---------------------------------------------------------
 @app.post("/patients/verify-report", tags=["Patients"])
 async def verify_lab_report(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not file.filename.endswith(".png"): 
-        raise HTTPException(status_code=400, detail="Please upload only .png format files!")
-    
+    file_ext = file.filename.split(".")[-1].lower()
+    if file_ext not in ["png", "pdf"]: 
+        raise HTTPException(status_code=400, detail="Please upload only .png or .pdf format files!")
+
     file_bytes = await file.read()
     uploaded_hash = hashlib.sha256(file_bytes).hexdigest()
-    
-    print(f"🔴 UPLOADED HASH: {uploaded_hash}") 
-    
-    # ඩේටාබේස් එකේ තියෙන Hash ටික බලාගන්න මේ පේළි දෙක එකතු කරන්න:
-    all_hashes = [t.file_hash for t in db.query(models.LabTest).all()]
-    print(f"📦 EXISTING HASHES IN DB: {all_hashes}")
 
     test_record = db.query(models.LabTest).filter(models.LabTest.file_hash == uploaded_hash).first()
 
     if test_record:
-        # 🟢 Send 200 OK only if the Hash matches
         return {"status": "AUTHENTIC", "message": "This is the original and authentic report issued by Medcare Hospital."}
     else:
-        # 🔴 Double check: Throw a 406 Error if the Hash doesn't match! (Will be caught by the Frontend Catch Block)
         raise HTTPException(
             status_code=406, 
-            detail="WARNING: This report has been altered or is a fake image!"
+            detail="WARNING: This report has been altered or is a fake document!"
         )
 
 @app.post("/admin/forensics/decrypt", tags=["Admin Operations", "Digital Forensics"])
 async def decrypt_leaked_report(req: Request, file: UploadFile = File(...), db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
-    """PDF 5.5: Digital Forensics - Extracting and viewing data from a leaked report"""
-    if not file.filename.endswith(".png"): raise HTTPException(status_code=400, detail="Only .png files are supported!")
+    """PDF 5.5: Digital Forensics - Extracting hidden data from leaked PNG or PDF reports"""
+    file_ext = file.filename.split(".")[-1].lower()
+    if file_ext not in ["png", "pdf"]: 
+        raise HTTPException(status_code=400, detail="Only .png and .pdf files are supported for forensic analysis!")
+        
     os.makedirs("uploaded_reports", exist_ok=True)
     temp_path = f"uploaded_reports/leak_check_{file.filename}"
-    with open(temp_path, "wb") as buffer: buffer.write(await file.read())
+    with open(temp_path, "wb") as buffer: 
+        buffer.write(await file.read())
 
     try:
-        hidden_encrypted_data = lsb.reveal(temp_path)
+        hidden_encrypted_data = None
+        
+        if file_ext == "png":
+            hidden_encrypted_data = lsb.reveal(temp_path)
+        elif file_ext == "pdf":
+            from pypdf import PdfReader
+            reader = PdfReader(temp_path)
+            metadata = reader.metadata
+            if metadata:
+                hidden_encrypted_data = metadata.get("/ForensicSignature")
+
         if not hidden_encrypted_data:
-            os.remove(temp_path)
-            return {"status": "CLEAN", "message": "No confidential data was found in this image."}
+            if os.path.exists(temp_path): os.remove(temp_path)
+            return {"status": "CLEAN", "message": "No confidential forensic watermark was found in this document."}
             
         decrypted_data = cipher_suite.decrypt(hidden_encrypted_data.encode('utf-8')).decode('utf-8')
-        os.remove(temp_path)
+        if os.path.exists(temp_path): os.remove(temp_path)
         
-        # Convert data to JSON
         parts = [p.strip() for p in decrypted_data.split('|')]
         forensic_result = {}
         for part in parts:
@@ -1548,32 +1592,36 @@ async def decrypt_leaked_report(req: Request, file: UploadFile = File(...), db: 
                 key, val = part.split(":", 1)
                 forensic_result[key.strip()] = val.strip()
                 
-        handler_id = forensic_result.get("Handler ID", "").replace("L-", "")
-        handler_name = "Unknown"
-        if handler_id.isdigit():
-            tech = db.query(models.User).filter(models.User.id == int(handler_id)).first()
-            if tech: handler_name = tech.username
+        raw_handler = forensic_result.get("Handler ID", "")
+        clean_id = raw_handler.replace("L-", "")
+        
+        tech = None
+        if clean_id.isdigit():
+            tech = db.query(models.User).filter(models.User.id == int(clean_id)).first()
+        if not tech:
+            tech = db.query(models.User).filter(
+                (models.User.employee_id == raw_handler) | (models.User.username == raw_handler)
+            ).first()
+
+        display_handler_id = tech.employee_id if (tech and tech.employee_id) else (tech.username if tech else raw_handler)
+        display_handler_name = tech.full_name if (tech and tech.full_name) else (tech.username if tech else "Unknown")
             
-        client_ip = req.client.host if 'req' in locals() else "Unknown"
+        client_ip = req.client.host if req else "Unknown"
         log_admin_action(db, current_user.id, "FORENSICS_DECRYPT", client_ip, f"Analyzed file: {file.filename}")
 
         return {
             "status": "🔴 LEAK SOURCE IDENTIFIED",
             "file_analyzed": file.filename,
+            "file_format": file_ext.upper(),
             "source_ip": forensic_result.get("IP", "Unknown"),
             "timestamp": f"{forensic_result.get('Date', '')} | {forensic_result.get('Time', '')}",
-            "handler_id": forensic_result.get("Handler ID", "Unknown"),
-            "handler_name": handler_name
+            "handler_id": display_handler_id,
+            "handler_name": display_handler_name
         }
-        
-    except IndexError: 
-        # 🟢 FIX: Return a clean status if a normal image without secret data triggers a Stegano IndexError!
-        if os.path.exists(temp_path): os.remove(temp_path)
-        return {"status": "CLEAN", "message": "This is a clean image. No confidential data is hidden here."}
         
     except Exception as e:
         if os.path.exists(temp_path): os.remove(temp_path)
-        raise HTTPException(status_code=400, detail="File corrupted or altered (Decryption failed).")
+        raise HTTPException(status_code=400, detail="File corrupted or invalid (Forensic extraction failed).")
 
 # ---------------------------------------------------------
 # MFA SETUP & MANAGEMENT (Google Authenticator & Email)

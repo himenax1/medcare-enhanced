@@ -7,7 +7,7 @@ import axios from "axios";
 import { 
   ShieldCheck, Home, LogOut, Activity, ArrowLeft, 
   Pill, Stethoscope, Calendar, Clock, AlertCircle, CheckCircle2, Building,
-  CreditCard, Lock, User 
+  CreditCard, Lock, User, ShieldAlert 
 } from "lucide-react";
 
 export default function PrescriptionsPage() {
@@ -166,6 +166,22 @@ export default function PrescriptionsPage() {
                       <span className="text-[8px] text-slate-500 uppercase tracking-widest font-bold">Scan to Verify</span>
                     </div>
                   </div>
+
+                  {rx.is_overridden && rx.override_reason && (
+                    <div className="mx-8 mt-6 p-4 bg-amber-950/30 border border-amber-900/50 rounded-2xl flex items-start gap-3">
+                      <div className="p-1.5 bg-amber-900/50 rounded-lg text-amber-400 shrink-0 mt-0.5">
+                        <ShieldAlert size={16} />
+                      </div>
+                      <div>
+                        <span className="text-[10px] font-bold uppercase tracking-widest text-amber-400 block mb-0.5 font-mono">
+                          Clinical DDI Override Justification
+                        </span>
+                        <p className="text-xs text-amber-200/90 font-mono italic">
+                          "{rx.override_reason}"
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Medicines Table */}
                   <div className="p-8">

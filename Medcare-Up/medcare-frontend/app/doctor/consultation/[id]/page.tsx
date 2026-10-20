@@ -44,7 +44,8 @@ export default function ConsultationActionPage() {
   const [medicines, setMedicines] = useState<any[]>([]);
   const [sendingRx, setSendingRx] = useState(false);
   const [ddiWarning, setDdiWarning] = useState<any>(null); // To store AI Warning
-  
+  const [overrideReason, setOverrideReason] = useState(""); //Override reason 
+
   // System messages
   const [sysMessage, setSysMessage] = useState({ text: "", type: "" }); // type: "success" | "error"
 
@@ -171,7 +172,8 @@ export default function ConsultationActionPage() {
       await axios.post(`http://localhost:8000/appointments/${appointmentId}/prescribe`, {
         medicines: medicines,
         doctor_note: doctorNote,
-        override_warning: override
+        override_warning: override,
+        override_reason: overrideReason // <-- ADD THIS LINE
       }, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -179,6 +181,8 @@ export default function ConsultationActionPage() {
       showToast("E-Prescription generated and securely sent to HealthVault.", "success");
       setMedicines([]);
       setDoctorNote("");
+      setOverrideReason(""); // <-- RESET REASON STATE
+      setDdiWarning(null);   // <-- CLOSE WARNING MODAL
 
     } catch (err: any) {
       if (err.response?.status === 400 && err.response?.data?.detail?.error_type === "DDI_WARNING") {
@@ -277,7 +281,7 @@ export default function ConsultationActionPage() {
               </div>
             </div>
             
-            <div className="space-y-4 font-mono text-sm mb-8">
+            <div className="space-y-4 font-mono text-sm mb-6">
               <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
                 <span className="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Rule Match</span>
                 <span className="text-amber-400 font-bold">{ddiWarning.rule_match}</span>
@@ -292,16 +296,31 @@ export default function ConsultationActionPage() {
               </div>
             </div>
 
+            {/* 🔴 NEW: Clinical Justification Textarea */}
+            <div className="mb-6">
+              <label className="block text-[10px] text-red-500 uppercase tracking-widest font-bold mb-2">
+                Clinical Justification for Override *
+              </label>
+              <textarea 
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                placeholder="State your clinical reason for overriding this warning (e.g., Benefits outweigh risk, patient under monitoring)..."
+                className="w-full bg-slate-950 border border-red-900/50 rounded-xl p-3 text-sm text-red-200 focus:outline-none focus:border-red-500 resize-none font-mono"
+                rows={2}
+              />
+            </div>
+
             <div className="flex flex-col md:flex-row gap-4">
               <button 
-                onClick={() => setDdiWarning(null)} 
+                onClick={() => { setDdiWarning(null); setOverrideReason(""); }} 
                 className="flex-1 py-4 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold tracking-widest uppercase transition-colors"
               >
                 Cancel & Edit Prescription
               </button>
               <button 
                 onClick={() => handleSendPrescription(true)} 
-                className="flex-1 py-4 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-black tracking-widest uppercase transition-colors shadow-[0_0_20px_rgba(220,38,38,0.3)] flex items-center justify-center gap-2 group"
+                disabled={!overrideReason.trim()}
+                className="flex-1 py-4 bg-red-600 hover:bg-red-500 text-white rounded-xl text-xs font-black tracking-widest uppercase transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-[0_0_20px_rgba(220,38,38,0.3)] flex items-center justify-center gap-2 group"
               >
                 <ShieldAlert size={16} className="group-hover:animate-ping" /> Override Warning & Send
               </button>

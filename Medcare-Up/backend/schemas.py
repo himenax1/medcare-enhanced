@@ -210,6 +210,7 @@ class PrescriptionCreate(BaseModel):
     medicines: List[PrescriptionItemBase]
     doctor_note: Optional[str] = None
     override_warning: bool = False
+    override_reason: Optional[str] = None
 
 class PrescriptionItemResponse(PrescriptionItemBase):
     id: int

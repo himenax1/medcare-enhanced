@@ -93,10 +93,10 @@ export default function LabTechDashboard() {
     e.preventDefault();
     if (!selectedFile || !selectedTestId) return;
 
-    if (!selectedFile.name.endsWith(".png")) {
-      showToast("Security Policy: Only .png files are allowed.", "error");
-      return;
-    }
+   if (!selectedFile.name.endsWith(".png") && !selectedFile.name.endsWith(".pdf")) {
+  showToast("Security Policy: Only .png or .pdf files are allowed.", "error");
+  return;
+  }
 
     setUploading(true);
     const formData = new FormData();
@@ -181,9 +181,9 @@ export default function LabTechDashboard() {
               <form onSubmit={handleFileUpload} className="space-y-6">
                 <div className="border-2 border-dashed border-slate-700 hover:border-sky-500/50 rounded-2xl p-8 text-center transition-colors relative">
                   <input 
-                    type="file" accept=".png" required
-                    onChange={(e) => setSelectedFile(e.target.files ? e.target.files[0] : null)}
-                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                     type="file" accept=".png,.pdf" required
+                     onChange={(e) => setSelectedFile(e.target.files ? e.target.files[0] : null)}
+                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                   />
                   {selectedFile ? (
                     <div className="flex flex-col items-center">
@@ -194,7 +194,7 @@ export default function LabTechDashboard() {
                     <div className="flex flex-col items-center">
                       <FileImage size={40} className="text-slate-600 mb-3" />
                       <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1">Click to browse file</p>
-                      <p className="text-[9px] text-slate-500 font-mono">Strictly .PNG format only</p>
+                      <p className="text-[9px] text-slate-500 font-mono">Supported formats: .PNG or .PDF</p>
                     </div>
                   )}
                 </div>
@@ -366,10 +366,10 @@ export default function LabTechDashboard() {
                         </button>
                       ) : (
                         <button 
-                          onClick={() => openUploadModal(record.req_id)}
-                          className="px-4 py-2 bg-sky-600 hover:bg-sky-500 border border-sky-500 text-white rounded-lg text-[9px] font-bold tracking-widest uppercase transition-all flex items-center gap-1.5 shadow-[0_0_15px_rgba(56,189,248,0.3)]"
+                           onClick={() => openUploadModal(record.req_id)}
+                            className="px-4 py-2 bg-sky-600 hover:bg-sky-500 border border-sky-500 text-white rounded-lg text-[9px] font-bold tracking-widest uppercase transition-all flex items-center gap-1.5 shadow-[0_0_15px_rgba(56,189,248,0.3)]"
                         >
-                          <Upload size={12} /> Upload .PNG
+                          <Upload size={12} /> Upload Report
                         </button>
                       )}
                     </div>
