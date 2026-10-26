@@ -1,3 +1,4 @@
+from sqlalchemy import text
 from database import get_lanka_time
 from typing import List, Optional
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from pydantic import BaseModel
 import os
+import httpx
 import random
 import re
 import uuid
@@ -146,55 +148,16 @@ def send_real_email_otp(target_email: str, otp: str):
     except Exception as e:
         print(f"❌ [SMTP ERROR] Failed to send email: {str(e)}")
 
-def send_appointment_reminders():
-    """Send appointment reminder messages for tomorrow"""
-    db = SessionLocal()
-    tomorrow = get_lanka_time().date() + timedelta(days=1)
-    
-    upcoming_apts = db.query(models.Appointment).filter(
-        models.Appointment.status == "Confirmed",
-        models.Appointment.date == tomorrow
-    ).all()
-    
-    for apt in upcoming_apts:
-        # 🟢 Get doctor's real name instead of ID to display to the patient
-        doc_user = db.query(models.User).filter(models.User.username == apt.doctor_name).first()
-        doc_display_name = doc_user.full_name if doc_user and doc_user.full_name else apt.doctor_name
-        
-        msg = f"Reminder: You have an appointment tomorrow ({tomorrow}) with Dr. {doc_display_name} (Queue No: {apt.slot_number})."
-        db.add(models.Notification(patient_id=apt.patient_id, message=msg, notification_type="APPOINTMENT_REMINDER", reference_id=apt.id))
-        
-    db.commit()
-    db.close()
-    print(f"[CRON] Sent Reminders for tomorrow's ({tomorrow}) appointments")
-
-def mark_no_shows_cron_job():
-    """Mark unattended appointments from yesterday as 'No Show'"""
-    db = SessionLocal()
-    yesterday = get_lanka_time().date() - timedelta(days=1)
-    
-    missed_appointments = db.query(models.Appointment).filter(
-        models.Appointment.status == "Confirmed",
-        models.Appointment.date <= yesterday
-    ).all()
-    
-    for apt in missed_appointments:
-        apt.status = "No Show"
-    
-    db.commit()
-    db.close()
-    print("[CRON] Marked missed appointments as 'No Show'")
-
 from datetime import datetime, timedelta
-from database import SessionLocal
+from database import SessionLocal, get_lanka_time
 
-# 1. No-Show එක අප්ඩේට් කරන ෆන්ක්ෂන් එක
 def mark_no_shows_cron_job():
-    db = SessionLocal() # Background job එකට වෙනම DB Session එකක් ගන්නවා
+    """Mark unattended appointments from yesterday or earlier as 'No Show'"""
+    db = SessionLocal()
     try:
-        today = datetime.now().date()
+        today = get_lanka_time().date()
         missed_appointments = db.query(models.Appointment).filter(
-            models.Appointment.status == "Pending",
+            models.Appointment.status == "Confirmed",
             models.Appointment.date < today
         ).all()
 
@@ -202,44 +165,48 @@ def mark_no_shows_cron_job():
             appt.status = "No Show"
 
         db.commit()
-        print(f"[{datetime.now()}] CRON: {len(missed_appointments)} old appointments marked as 'No Show'.")
+        print(f"[{get_lanka_time()}] CRON: {len(missed_appointments)} missed appointments marked as 'No Show'.")
     except Exception as e:
         db.rollback()
         print(f"Error in No-Show Cron Job: {e}")
     finally:
         db.close()
 
-# 2. Reminders යවන ෆන්ක්ෂන් එක
+
 def send_appointment_reminders():
+    """Send appointment reminder messages for tomorrow"""
     db = SessionLocal()
     try:
-        tomorrow = datetime.now().date() + timedelta(days=1)
+        tomorrow = get_lanka_time().date() + timedelta(days=1)
         upcoming_appointments = db.query(models.Appointment).filter(
-            models.Appointment.status == "Pending",
+            models.Appointment.status == "Confirmed",
             models.Appointment.date == tomorrow
         ).all()
 
         count = 0
         for appt in upcoming_appointments:
-            # මේ Reminder එක කලින් යවලා තියෙනවද බලනවා
             existing_notif = db.query(models.Notification).filter(
                 models.Notification.patient_id == appt.patient_id,
                 models.Notification.reference_id == appt.id,
-                models.Notification.notification_type == "REMINDER"
+                models.Notification.notification_type == "APPOINTMENT_REMINDER"
             ).first()
             
             if not existing_notif:
+                doc_user = db.query(models.User).filter(models.User.username == appt.doctor_name).first()
+                doc_display_name = doc_user.full_name if doc_user and doc_user.full_name else appt.doctor_name
+                
+                msg = f"Reminder: You have an appointment tomorrow ({tomorrow}) with Dr. {doc_display_name} (Queue No: {appt.slot_number})."
                 new_notif = models.Notification(
                     patient_id=appt.patient_id,
-                    message=f"Reminder: You have an appointment with {appt.doctor_name} tomorrow. Slot: {appt.slot_number}",
-                    notification_type="REMINDER",
+                    message=msg,
+                    notification_type="APPOINTMENT_REMINDER",
                     reference_id=appt.id
                 )
                 db.add(new_notif)
                 count += 1
 
         db.commit()
-        print(f"[{datetime.now()}] CRON: {count} Reminders sent for tomorrow's appointments.")
+        print(f"[{get_lanka_time()}] CRON: {count} reminders sent for tomorrow ({tomorrow}).")
     except Exception as e:
         db.rollback()
         print(f"Error in Reminder Cron Job: {e}")
@@ -665,12 +632,6 @@ def get_monthly_schedules(year: int, month: int, db: Session = Depends(get_db)):
         })
     return schedule_data
 
-    """Send already scheduled dates to lock them in the Admin Calendar"""
-    doctor = db.query(models.User).filter(models.User.username == doctor_username).first()
-    if not doctor: raise HTTPException(status_code=404, detail="Doctor not found")
-    
-    schedules = db.query(models.DoctorSchedule).filter(models.DoctorSchedule.doctor_id == doctor.id).all()
-    return [str(sch.date) for sch in schedules]
 
 @app.get("/schedules/slots", tags=["Appointments"])
 def get_available_slots(date: date, doctor_username: str, db: Session = Depends(get_db)):
@@ -845,33 +806,28 @@ def patient_arrived_trigger(appointment_id: int, req: Request, db: Session = Dep
         
     return new_bill
 
-LAB_TEST_PRICES = {
-    "Urine Full Report (UFR)": 1200.0, "Urine Culture & ABST": 4000.0, "Serum Creatinine": 1200.0,
-    "eGFR": 500.0, "Blood Urea Nitrogen (BUN)": 1500.0, "Fasting Blood Sugar (FBS)": 900.0,
-    "HbA1c": 2800.0, "Serum Electrolytes (Na+, K+, Cl-)": 3500.0, "VDRL Test / HIV Screening": 2500.0, "Full Blood Count (FBC)": 1500.0
-}
-
 @app.get("/doctors/lab-test-catalog", tags=["Doctor Operations"])
 def get_lab_test_catalog(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    """Provide the approved test list to generate the Dropdown menu in the Frontend"""
+    """Fetch live approved lab tests directly from the Database Catalog"""
     if current_user.role != "Doctor":
         raise HTTPException(status_code=403, detail="Doctors only.")
     
-    # Convert Dictionary to a List of Objects and send to Frontend
-    catalog = [{"test_name": name, "price": price} for name, price in LAB_TEST_PRICES.items()]
-    return catalog
+    db_tests = db.query(models.LabTestCatalog).all()
+    return [{"test_name": test.test_name, "price": test.price} for test in db_tests]
+
 
 @app.post("/appointments/{appointment_id}/send-to-lab", response_model=schemas.BillResponse, tags=["Doctor Operations"])
 def send_to_lab_trigger(appointment_id: int, request: schemas.LabTestRequest, req: Request, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    """Send to lab and add fees (Idempotent / Double-click protected)"""
-    if request.test_name not in LAB_TEST_PRICES:
-        raise HTTPException(status_code=400, detail="This laboratory test is not approved in the system!")
+    """Send to lab and dynamically add fees from Database Catalog"""
+    
+    catalog_item = db.query(models.LabTestCatalog).filter(models.LabTestCatalog.test_name == request.test_name).first()
+    if not catalog_item:
+        raise HTTPException(status_code=400, detail="This laboratory test is not in the hospital catalog!")
         
     bill = db.query(models.Bill).filter(models.Bill.appointment_id == appointment_id).first()
     if not bill: 
         raise HTTPException(status_code=404, detail="Please click 'Patient Arrived' first")
     
-    # 🚨 Idempotency Logic: If the requested test is already in the queue (Pending), return the existing bill without adding fees again.
     existing_test = db.query(models.LabTest).filter(
         models.LabTest.patient_id == bill.patient_id, 
         models.LabTest.test_name == request.test_name,
@@ -879,10 +835,9 @@ def send_to_lab_trigger(appointment_id: int, request: schemas.LabTestRequest, re
     ).first()
     
     if existing_test:
-        return bill # Fees won't be charged twice! (Even if the Doctor clicks 100 times, the bill won't increase)
+        return bill
         
-    # Add fees only if it is a new test
-    bill.lab_fee += LAB_TEST_PRICES[request.test_name]
+    bill.lab_fee += catalog_item.price
     bill.total_amount = bill.doctor_fee + bill.lab_fee
     
     new_lab_test = models.LabTest(patient_id=bill.patient_id, test_name=request.test_name, status="Pending", received_time=get_lanka_time())
@@ -935,33 +890,85 @@ def cancel_lab_test(test_id: int, db: Session = Depends(get_db), current_user: m
 
     return {"message": "Lab test request cancelled successfully"}
 
-def check_ddi(medicines: list):
-    """Send Structured data to easily render the Alert Box in the Frontend"""
-    meds = set(medicines)
-    if "Diclofenac" in meds and "Ibuprofen" in meds: 
-        return {"rule_match": "NSAID + NSAID", "risk_level": "🔴 LETHAL / CRITICAL", "details": "High risk of severe bleeding and kidney failure."}
-    if "Losartan" in meds and "Potassium Citrate" in meds: 
-        return {"rule_match": "ARB + Potassium Supplement", "risk_level": "🔴 LETHAL / CRITICAL", "details": "Giving Losartan and Potassium Citrate together can put the patient at risk of Hyperkalemic Cardiac Arrest."}
-    if "Tamsulosin" in meds and "Sildenafil" in meds: 
-        return {"rule_match": "Alpha-blocker + PDE5 Inhibitor", "risk_level": "🔴 HIGH RISK", "details": "Risk of severe hypotension."}
-    if "Ciprofloxacin" in meds and ("Calcium Carbonate" in meds or "Iron Tablets" in meds): 
-        return {"rule_match": "Antibiotic + Minerals", "risk_level": "🟠 MODERATE RISK", "details": "Minerals prevent antibiotic absorption."}
-    if "Ibuprofen" in meds and "Prednisolone" in meds: 
-        return {"rule_match": "NSAID + Corticosteroid", "risk_level": "🔴 HIGH RISK", "details": "Increased risk of peptic ulcers."}
+def check_ddi(medicines: list, db: Session):
+    """Dynamically checks prescribed medicines against active database DDI rules."""
+    if not medicines or len(medicines) < 2:
+        return None
+
+    prescribed_lower = [m.strip().lower() for m in medicines]
+    active_rules = db.query(models.DDIRule).filter(models.DDIRule.is_active == True).all()
+
+    for rule in active_rules:
+        drug_a_match = any(rule.drug_a.lower() in p or p in rule.drug_a.lower() for p in prescribed_lower)
+        drug_b_match = any(rule.drug_b.lower() in p or p in rule.drug_b.lower() for p in prescribed_lower)
+
+        if drug_a_match and drug_b_match:
+            return {
+                "rule_match": rule.rule_name,
+                "risk_level": rule.risk_level,
+                "details": rule.details
+            }
     return None
+
+
+def seed_default_clinical_data():
+    """Populates default DDI rules, Lab Catalog prices, and Medicine Inventory if database tables are empty."""
+    db = SessionLocal()
+    try:
+        if db.query(models.DDIRule).count() == 0:
+            default_ddi = [
+                models.DDIRule(drug_a="Diclofenac", drug_b="Ibuprofen", rule_name="NSAID + NSAID", risk_level="🔴 LETHAL / CRITICAL", details="High risk of severe bleeding and kidney failure."),
+                models.DDIRule(drug_a="Losartan", drug_b="Potassium Citrate", rule_name="ARB + Potassium Supplement", risk_level="🔴 LETHAL / CRITICAL", details="Giving Losartan and Potassium Citrate together can put the patient at risk of Hyperkalemic Cardiac Arrest."),
+                models.DDIRule(drug_a="Tamsulosin", drug_b="Sildenafil", rule_name="Alpha-blocker + PDE5 Inhibitor", risk_level="🔴 HIGH RISK", details="Risk of severe hypotension."),
+                models.DDIRule(drug_a="Ciprofloxacin", drug_b="Calcium Carbonate", rule_name="Antibiotic + Minerals", risk_level="🟠 MODERATE RISK", details="Minerals prevent antibiotic absorption."),
+                models.DDIRule(drug_a="Ibuprofen", drug_b="Prednisolone", rule_name="NSAID + Corticosteroid", risk_level="🔴 HIGH RISK", details="Increased risk of peptic ulcers.")
+            ]
+            db.add_all(default_ddi)
+
+        if db.query(models.LabTestCatalog).count() == 0:
+            default_labs = [
+                models.LabTestCatalog(test_name="Urine Full Report (UFR)", price=1200.0),
+                models.LabTestCatalog(test_name="Urine Culture & ABST", price=4000.0),
+                models.LabTestCatalog(test_name="Serum Creatinine", price=1200.0),
+                models.LabTestCatalog(test_name="eGFR", price=500.0),
+                models.LabTestCatalog(test_name="Blood Urea Nitrogen (BUN)", price=1500.0),
+                models.LabTestCatalog(test_name="Fasting Blood Sugar (FBS)", price=900.0),
+                models.LabTestCatalog(test_name="HbA1c", price=2800.0),
+                models.LabTestCatalog(test_name="Serum Electrolytes (Na+, K+, Cl-)", price=3500.0),
+                models.LabTestCatalog(test_name="VDRL Test / HIV Screening", price=2500.0),
+                models.LabTestCatalog(test_name="Full Blood Count (FBC)", price=1500.0)
+            ]
+            db.add_all(default_labs)
+
+        if db.query(models.MedicineInventory).count() == 0:
+            default_meds = [
+                models.MedicineInventory(brand_name="Cozaar", generic_name="Losartan", category="Nephrology", is_available=True),
+                models.MedicineInventory(brand_name="Lasix", generic_name="Furosemide", category="Nephrology", is_available=True),
+                models.MedicineInventory(brand_name="Lipitor", generic_name="Atorvastatin", category="Cardiology", is_available=True),
+                models.MedicineInventory(brand_name="Panadol", generic_name="Paracetamol", category="General", is_available=True)
+            ]
+            db.add_all(default_meds)
+
+        db.commit()
+        print("🟢 [CLINICAL ENGINE] Default DDI rules, Lab Test catalog, and Medicine Inventory initialized successfully!")
+    except Exception as e:
+        db.rollback()
+        print(f"🔴 [CLINICAL SEED ERROR]: {e}")
+    finally:
+        db.close()
+
+seed_default_clinical_data()
 
 @app.post("/appointments/{appointment_id}/prescribe", response_model=schemas.PrescriptionResponse, tags=["Doctor Operations"])
 def create_prescription(appointment_id: int, prescription: schemas.PrescriptionCreate, req: Request, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    # 🚨 FIX 3: Block sending empty prescriptions (Empty Validation)
     if not prescription.medicines and not prescription.doctor_note:
         raise HTTPException(status_code=400, detail="Cannot send an empty prescription without medicines or a doctor's note!")
     appointment = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
     if not appointment: raise HTTPException(status_code=404, detail="Appointment not found!")
 
     med_names = [item.medicine_name for item in prescription.medicines]
-    warning = check_ddi(med_names)
+    warning = check_ddi(med_names, db)
 
-# 🚨 FIX: Send Error as Structured JSON to easily render the UI in the Frontend
     if warning and not prescription.override_warning:
         raise HTTPException(
             status_code=400, 
@@ -983,14 +990,13 @@ def create_prescription(appointment_id: int, prescription: schemas.PrescriptionC
         patient_id=appointment.patient_id, 
         doctor_note=prescription.doctor_note, 
         is_overridden=prescription.override_warning,
-        override_reason=prescription.override_reason if prescription.override_warning else None  # <-- ADD THIS LINE
+        override_reason=prescription.override_reason if prescription.override_warning else None
     )
 
     db.add(new_rx)
     db.commit()
     db.refresh(new_rx)
 
-    # Contains all 10 new medicine data fields (Section 2.1)
     for item in prescription.medicines:
         db.add(models.PrescriptionItem(
             prescription_id=new_rx.id, 
@@ -1012,23 +1018,30 @@ def create_prescription(appointment_id: int, prescription: schemas.PrescriptionC
         client_ip = req.client.host if req else "Unknown"
         
         if prescription.override_warning:
-            # Extract the doctor's justification reason
             reason_text = prescription.override_reason if prescription.override_reason else "No reason provided"
             
-            # 1. Combine data and generate a SHA-256 Hash including the justification reason
             blockchain_data = f"Doctor_{current_user.id}|Patient_{appointment.patient_id}|OVERRIDE_DDI|{rx_num}|{get_lanka_time().isoformat()}|Reason_{reason_text}"
             generated_hash = hashlib.sha256(blockchain_data.encode()).hexdigest()
             
-            # 2. Send the generated Hash to the Sepolia Blockchain network
             blockchain_tx_id = push_hash_to_sepolia(generated_hash)
             
-            # 3. Save the Audit Log in our Database along with the justification reason and TxID
+            # Save log entry in BlockchainAuditLog table
+            bc_log = models.BlockchainAuditLog(
+                actor_id=current_user.id,
+                actor_role="Doctor",
+                action_type="DDI_OVERRIDE",
+                data_hash=generated_hash,
+                tx_id=blockchain_tx_id,
+                details=f"Overrode DDI for Rx: {rx_num}. Reason: {reason_text}"
+            )
+            db.add(bc_log)
+            db.commit()
+
             log_details = f"DDI Bypassed. Reason: {reason_text} | Internal Hash: {generated_hash} | Blockchain TxID: {blockchain_tx_id}"
             log_doctor_action(db, current_user.id, "WARNING_OVERRIDDEN_BLOCKCHAIN", client_ip, log_details)
         else:
             log_doctor_action(db, current_user.id, "PRESCRIBED", client_ip, f"Issued E-Prescription: {rx_num}")
         
-    # 🟢 Retrieve the doctor's real name instead of ID to display to the patient
     doc_display_name = current_user.full_name if current_user.full_name else current_user.username
     notif = models.Notification(
         patient_id=appointment.patient_id, 
@@ -1302,12 +1315,6 @@ def get_my_profile(db: Session = Depends(get_db), current_user: models.User = De
         "email": current_user.email, "phone": patient.contact_number, "address": patient.home_address, "dob": patient.dob,
         "mfa_email_enabled": current_user.mfa_email_enabled, "mfa_app_enabled": current_user.mfa_app_enabled
     }
-
-
-    """Retrieve patient's Notifications"""
-    return db.query(models.Notification).filter(models.Notification.patient_id == current_user.id).order_by(models.Notification.created_at.desc()).all()
-
-
 
 @app.get("/schedules/available", tags=["Appointments"])
 def get_all_available_schedules(db: Session = Depends(get_db)):
@@ -2335,17 +2342,41 @@ def approve_profile_change(request_id: int, req: Request, db: Session = Depends(
 # ---------------------------------------------------------
 # PASSWORD RECOVERY (Forgot Password Logic)
 # ---------------------------------------------------------
-import secrets
-
 @app.post("/auth/forgot-password", tags=["Authentication"])
-def forgot_password(request: schemas.PasswordResetRequest, db: Session = Depends(get_db)):
-    """Email a real Reset Link via SMTP when a user forgets their password"""
+async def forgot_password(request: schemas.PasswordResetRequest, db: Session = Depends(get_db)):
+    """Email a real Reset Link via SMTP with Quantum QRNG Token Generation"""
     user = db.query(models.User).filter(models.User.email == request.email).first()
     if not user:
-        # Security best practice: don't reveal if user exists
         return {"message": "If this email address exists in the system, you will receive a Reset Link."}
         
-    reset_token = secrets.token_urlsafe(32)
+    # --- QUANTUM QRNG INTEGRATION (ANU API) ---
+    reset_token = None
+    anu_key = os.getenv("ANU_API_KEY")
+
+    if anu_key:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                headers = {"x-api-key": anu_key}
+                res = await client.get(
+                    "https://api.quantumnumbers.anu.edu.au?length=16&type=hex16&size=1",
+                    headers=headers
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    if data.get("success") and data.get("data"):
+                        # Join 16 hex16 blocks to create a 64-character Quantum Token
+                        reset_token = "".join(data["data"]) 
+                        print("🟢 [SECURITY] Quantum Token Generated Successfully!")
+        except Exception as e:
+            print(f"⚠️ [SECURITY WARNING] Quantum API failed, using fallback mechanism: {str(e)}")
+
+    # Standard Math Fallback mechanism if ANU API is unreachable
+    if not reset_token:
+        import secrets
+        reset_token = secrets.token_hex(32) # Generates a secure 64-character hex string
+    # -------------------------------------------
+
     expires = get_lanka_time() + timedelta(minutes=15)
     
     new_token_record = models.PasswordResetToken(
@@ -2357,9 +2388,8 @@ def forgot_password(request: schemas.PasswordResetRequest, db: Session = Depends
     db.commit()
     
     # Generate real link
-    reset_link = f"http://localhost:3000/reset-password?token={reset_token}"
+    reset_link = f"{os.getenv('FRONTEND_URL', 'http://localhost:3000')}/reset-password?token={reset_token}"
     
-    # 🟢 DISPATCH REAL EMAIL VIA SMTP
     smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(os.getenv("SMTP_PORT", 465))
     sender_email = os.getenv("SMTP_EMAIL")
@@ -2372,19 +2402,17 @@ def forgot_password(request: schemas.PasswordResetRequest, db: Session = Depends
             msg['To'] = user.email
             msg['Subject'] = "MedCare Account - Password Reset Request"
             
-            body = f"""
-            Hello,
+            body = f"""Hello,
             
-            A password reset was requested for your MedCare account. 
-            Click the secure link below to set a new password (valid for 15 minutes):
-            
-            {reset_link}
-            
-            If you did not request this, please ignore this email.
-            
-            Securely,
-            Project Medcare Security Team
-            """
+A password reset was requested for your MedCare account. 
+Click the secure link below to set a new password (valid for 15 minutes):
+
+{reset_link}
+
+If you did not request this, please ignore this email.
+
+Securely,
+Project Medcare Security Team"""
             msg.attach(MIMEText(body, 'plain'))
 
             server = smtplib.SMTP_SSL(smtp_server, smtp_port)
@@ -2870,24 +2898,56 @@ def get_lab_tech_dashboard(db: Session = Depends(get_db), current_user: models.U
 
 # --- 1. MEDICINE INVENTORY (Admin & Doctor) ---
 @app.post("/admin/medicines", response_model=schemas.MedicineResponse, tags=["Inventory Management"])
-def add_medicine(request: schemas.MedicineCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+def add_medicine(request: schemas.MedicineCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
     """Allow Admin to add new medicines to the hospital's medicine inventory"""
-    if current_user.role != "Admin":
-        raise HTTPException(status_code=403, detail="Admins only.")
-        
     new_med = models.MedicineInventory(**request.dict())
     db.add(new_med)
     db.commit()
     db.refresh(new_med)
     return new_med
 
-@app.get("/medicines", response_model=List[schemas.MedicineResponse], tags=["Inventory Management"])
+@app.get("/medicines", tags=["Inventory Management"])
 def get_all_medicines(db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
-    """Fetch the medicine list for the Dropdown when the Doctor writes a Prescription"""
-    # Allowed only for Doctors and Admins
+    """Fetch the medicine list for Doctors writing prescriptions or Admin management table"""
     if current_user.role not in ["Doctor", "Admin"]:
         raise HTTPException(status_code=403, detail="Unauthorized access.")
-    return db.query(models.MedicineInventory).filter(models.MedicineInventory.is_available == True).all()
+    
+    meds = db.query(models.MedicineInventory).all()
+    
+    # Maps DB columns to the exact keys the React UI expects without crashing
+    mapped_meds = [{
+        "id": m.id, 
+        "brand_name": getattr(m, "brand_name", getattr(m, "brand", "Unknown")), 
+        "generic_name": getattr(m, "generic_name", getattr(m, "name", "Unknown")), 
+        "category": getattr(m, "category", "General"), 
+        "is_available": getattr(m, "is_available", True)
+    } for m in meds]
+
+    if current_user.role == "Admin":
+        return mapped_meds
+    return [m for m in mapped_meds if m["is_available"]]
+
+@app.delete("/admin/medicines/{medicine_id}", tags=["Inventory Management"])
+def delete_medicine(medicine_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    """Allow Admin to delete a medicine from the formulary"""
+    med = db.query(models.MedicineInventory).filter(models.MedicineInventory.id == medicine_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="Medicine not found.")
+
+    db.delete(med)
+    db.commit()
+    return {"message": "Medicine removed from formulary successfully."}
+
+@app.put("/admin/medicines/{medicine_id}/toggle", tags=["Inventory Management"])
+def toggle_medicine_availability(medicine_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    """Toggle medicine stock availability status"""
+    med = db.query(models.MedicineInventory).filter(models.MedicineInventory.id == medicine_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="Medicine not found.")
+
+    med.is_available = not med.is_available
+    db.commit()
+    return {"message": f"Medicine availability updated to {med.is_available}.", "is_available": med.is_available}
 
 # --- 2. DOCTOR'S WORKFLOW MISSING ENDPOINTS ---
 
@@ -3122,3 +3182,268 @@ def trigger_jobs_manually(current_user: models.User = Depends(auth.require_admin
     mark_no_shows_cron_job()
     send_appointment_reminders()
     return {"message": "Background tasks executed successfully! Check terminal logs."}
+
+    # =========================================================
+# CLINICAL & HOSPITAL CONTROL MODELS (DDI, LAB CATALOG, BLOCKCHAIN)
+# =========================================================
+
+
+    # =========================================================
+# ADMIN CLINICAL HUB (DDI ENGINE, OPENFDA, LAB CATALOG, BLOCKCHAIN)
+# =========================================================
+
+# --- 1. openFDA Medical API Fetcher ---
+@app.get("/admin/ddi/fetch-fda-info", tags=["Admin DDI Operations"])
+async def fetch_openfda_interaction(drug_a: str, drug_b: str, current_user: models.User = Depends(auth.require_admin)):
+    """Fetch official drug interaction guidance from openFDA API."""
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            url = f"https://api.fda.gov/drug/label.json?search=drug_interactions:{drug_a}+AND+drug_interactions:{drug_b}&limit=1"
+            res = await client.get(url)
+            
+            if res.status_code == 200:
+                data = res.json()
+                results = data.get("results", [])
+                if results:
+                    interactions = results[0].get("drug_interactions", ["No specific interaction text found."])
+                    snippet = interactions[0][:300] + "..." if len(interactions[0]) > 300 else interactions[0]
+                    return {
+                        "found": True,
+                        "suggested_rule": f"{drug_a.capitalize()} + {drug_b.capitalize()}",
+                        "suggested_details": snippet,
+                        "risk_level": "🔴 HIGH RISK"
+                    }
+
+        return {
+            "found": False,
+            "message": f"No official openFDA interaction report found for {drug_a} and {drug_b}. You can enter details manually."
+        }
+    except Exception as e:
+        return {"found": False, "message": f"openFDA API lookup failed: {str(e)}"}
+
+
+# --- 2. DDI Rule Management ---
+@app.get("/admin/ddi-rules", response_model=List[schemas.DDIRuleResponse], tags=["Admin DDI Operations"])
+def get_all_ddi_rules(db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    return db.query(models.DDIRule).order_by(models.DDIRule.id.desc()).all()
+
+
+@app.post("/admin/ddi-rules", response_model=schemas.DDIRuleResponse, tags=["Admin DDI Operations"])
+def create_ddi_rule(request: schemas.DDIRuleCreate, req: Request, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    new_rule = models.DDIRule(
+        drug_a=request.drug_a.strip(),
+        drug_b=request.drug_b.strip(),
+        rule_name=request.rule_name.strip(),
+        risk_level=request.risk_level,
+        details=request.details.strip(),
+        is_active=True
+    )
+    db.add(new_rule)
+    db.commit()
+    db.refresh(new_rule)
+
+    bc_payload = f"Admin_{current_user.id}|CREATE_DDI_RULE|RuleID_{new_rule.id}|{new_rule.drug_a}+{new_rule.drug_b}|{get_lanka_time().isoformat()}"
+    rule_hash = hashlib.sha256(bc_payload.encode()).hexdigest()
+    tx_id = push_hash_to_sepolia(rule_hash)
+
+    bc_log = models.BlockchainAuditLog(
+        actor_id=current_user.id,
+        actor_role="Admin",
+        action_type="DDI_RULE_CREATED",
+        data_hash=rule_hash,
+        tx_id=tx_id,
+        details=f"Created DDI Rule '{new_rule.rule_name}' ({new_rule.drug_a} + {new_rule.drug_b})"
+    )
+    db.add(bc_log)
+    db.commit()
+
+    client_ip = req.client.host if req else "Unknown"
+    log_admin_action(db, current_user.id, "DDI_RULE_CREATED", client_ip, f"Added rule: {new_rule.rule_name}")
+    return new_rule
+
+
+@app.put("/admin/ddi-rules/{rule_id}/toggle", tags=["Admin DDI Operations"])
+def toggle_ddi_rule(rule_id: int, req: Request, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    rule = db.query(models.DDIRule).filter(models.DDIRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="DDI Rule not found.")
+
+    rule.is_active = not rule.is_active
+    db.commit()
+
+    status_str = "ENABLED" if rule.is_active else "DISABLED"
+    bc_payload = f"Admin_{current_user.id}|TOGGLE_DDI_RULE|RuleID_{rule.id}|Status_{status_str}|{get_lanka_time().isoformat()}"
+    rule_hash = hashlib.sha256(bc_payload.encode()).hexdigest()
+    tx_id = push_hash_to_sepolia(rule_hash)
+
+    bc_log = models.BlockchainAuditLog(
+        actor_id=current_user.id,
+        actor_role="Admin",
+        action_type=f"DDI_RULE_{status_str}",
+        data_hash=rule_hash,
+        tx_id=tx_id,
+        details=f"Set DDI Rule '{rule.rule_name}' to {status_str}"
+    )
+    db.add(bc_log)
+    db.commit()
+
+    client_ip = req.client.host if req else "Unknown"
+    log_admin_action(db, current_user.id, f"DDI_RULE_{status_str}", client_ip, f"Toggled rule ID {rule_id} to {status_str}")
+    return {"message": f"DDI Rule '{rule.rule_name}' has been {status_str.lower()}.", "is_active": rule.is_active}
+
+
+@app.delete("/admin/ddi-rules/{rule_id}", tags=["Admin DDI Operations"])
+def delete_ddi_rule(rule_id: int, req: Request, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    rule = db.query(models.DDIRule).filter(models.DDIRule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="DDI Rule not found.")
+
+    rule_name = rule.rule_name
+    db.delete(rule)
+    db.commit()
+
+    bc_payload = f"Admin_{current_user.id}|DELETE_DDI_RULE|RuleID_{rule_id}|{get_lanka_time().isoformat()}"
+    rule_hash = hashlib.sha256(bc_payload.encode()).hexdigest()
+    tx_id = push_hash_to_sepolia(rule_hash)
+
+    bc_log = models.BlockchainAuditLog(
+        actor_id=current_user.id,
+        actor_role="Admin",
+        action_type="DDI_RULE_DELETED",
+        data_hash=rule_hash,
+        tx_id=tx_id,
+        details=f"Deleted DDI Rule '{rule_name}' (ID: {rule_id})"
+    )
+    db.add(bc_log)
+    db.commit()
+
+    client_ip = req.client.host if req else "Unknown"
+    log_admin_action(db, current_user.id, "DDI_RULE_DELETED", client_ip, f"Deleted rule: {rule_name}")
+    return {"message": f"DDI Rule '{rule_name}' deleted successfully."}
+
+
+# --- 3. Lab Test Catalog & Pricing ---
+@app.get("/admin/lab-catalog", tags=["Admin Operations"])
+def get_lab_catalog(db: Session = Depends(get_db)):
+    labs = db.query(models.LabTestCatalog).all()
+    # Forces the payload to include 'is_available' to satisfy the frontend schema
+    return [{"id": l.id, "test_name": l.test_name, "price": l.price, "is_available": True} for l in labs]
+
+@app.post("/admin/lab-catalog", response_model=schemas.LabTestCatalogResponse, tags=["Admin Operations"])
+def add_lab_test(request: schemas.LabTestCatalogCreate, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    existing = db.query(models.LabTestCatalog).filter(models.LabTestCatalog.test_name == request.test_name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="This laboratory test already exists in the catalog.")
+
+    new_test = models.LabTestCatalog(test_name=request.test_name, price=request.price)
+    db.add(new_test)
+    db.commit()
+    db.refresh(new_test)
+    return new_test
+
+
+@app.put("/admin/lab-catalog/{test_id}", response_model=schemas.LabTestCatalogResponse, tags=["Admin Operations"])
+def update_lab_test_price(test_id: int, price: float, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    test = db.query(models.LabTestCatalog).filter(models.LabTestCatalog.id == test_id).first()
+    if not test:
+        raise HTTPException(status_code=404, detail="Lab test not found.")
+
+    test.price = price
+    db.commit()
+    db.refresh(test)
+    return test
+
+# 🟢 ADD THIS DELETE ENDPOINT HERE:
+@app.delete("/admin/lab-catalog/{test_id}", tags=["Admin Operations"])
+def delete_lab_catalog_item(test_id: int, db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    test = db.query(models.LabTestCatalog).filter(models.LabTestCatalog.id == test_id).first()
+    if not test:
+        raise HTTPException(status_code=404, detail="Lab test not found.")
+
+    db.delete(test)
+    db.commit()
+    return {"message": "Lab test removed from catalog successfully."}
+
+# --- 4. Blockchain Audit Ledger Viewer ---
+@app.get("/admin/blockchain-logs", response_model=List[schemas.BlockchainLogResponse], tags=["Admin Operations"])
+def get_blockchain_audit_logs(db: Session = Depends(get_db), current_user: models.User = Depends(auth.require_admin)):
+    """Fetch all DDI-related Sepolia blockchain audit trail entries."""
+    return db.query(models.BlockchainAuditLog).order_by(models.BlockchainAuditLog.timestamp.desc()).limit(100).all()
+
+@app.get("/admin/fix-db", tags=["Admin Operations"])
+def fix_database_schema(db: Session = Depends(get_db)):
+    """Temporary endpoint to fix missing database columns without dropping tables"""
+    try:
+        from sqlalchemy import text
+        # Forcefully add the missing column to PostgreSQL
+        db.execute(text("ALTER TABLE prescriptions ADD COLUMN override_reason VARCHAR;"))
+        db.commit()
+        return {"message": "✅ Successfully added override_reason to the database! You can now load your pages."}
+    except Exception as e:
+        db.rollback()
+        return {"message": f"Note: Column might already exist or error occurred: {str(e)}"}
+
+
+# --- FOLLOW UP REMINDER ENGINE ---
+followup_scheduler = BackgroundScheduler()
+
+# 1. Automate Next-Day Reminders (Runs every day at 8:00 AM)
+followup_scheduler.add_job(send_appointment_reminders, 'cron', hour=6, minute=0)
+
+# 2. Automate No-Show Marks (Runs every day at 12:01 AM to clear yesterday's missed queue)
+followup_scheduler.add_job(mark_no_shows_cron_job, 'cron', hour=0, minute=1)
+
+followup_scheduler.start()
+
+def dispatch_delayed_followup(patient_id: int, doctor_name: str, target_date: str):
+    """Background task that executes when the follow-up is due"""
+    db = SessionLocal()
+    try:
+        msg = f"Reminder: It is time for your follow-up appointment with {doctor_name} scheduled around {target_date}. Please book your slot via the app."
+        new_notif = models.Notification(
+            patient_id=patient_id,
+            message=msg,
+            notification_type="FOLLOW_UP_REMINDER",
+            reference_id=0
+        )
+        db.add(new_notif)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Failed to dispatch follow-up reminder: {e}")
+    finally:
+        db.close()
+
+class FollowUpRequest(BaseModel):
+    follow_up_date: str
+
+@app.post("/appointments/{appointment_id}/set-follow-up", tags=["Doctor Operations"])
+def schedule_follow_up_reminder(appointment_id: int, request: FollowUpRequest, db: Session = Depends(get_db), current_user: models.User = Depends(auth.get_current_user)):
+    """PDF Requirement: Set a future follow-up reminder for a patient (e.g. 1 month from now)"""
+    if current_user.role != "Doctor":
+        raise HTTPException(status_code=403, detail="Doctors only.")
+        
+    apt = db.query(models.Appointment).filter(models.Appointment.id == appointment_id).first()
+    if not apt:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+        
+    target_date = datetime.strptime(request.follow_up_date, "%Y-%m-%d")
+    
+    # Schedule the notification to trigger exactly 3 days before the follow-up date
+    notify_date = target_date - timedelta(days=3)
+    
+    # Safety check: if the follow-up is less than 3 days away, send it in 1 minute
+    if notify_date < datetime.now():
+        notify_date = datetime.now() + timedelta(minutes=1)
+        
+    doc_display_name = f"Dr. {current_user.full_name if current_user.full_name else current_user.username}"
+
+    # Lock the job into the background scheduler
+    followup_scheduler.add_job(
+        dispatch_delayed_followup, 
+        'date', 
+        run_date=notify_date, 
+        args=[apt.patient_id, doc_display_name, request.follow_up_date]
+    )
+    
+    return {"message": f"Follow-up automated reminder successfully scheduled for {request.follow_up_date}."}

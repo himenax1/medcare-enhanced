@@ -10,15 +10,6 @@ import {
   Save, AlertOctagon, Info, ShieldAlert, Plus, Trash2, Activity, ScrollText 
 } from "lucide-react";
 
-// Pre-approved Medicines (100% matched with PDF requirements)
-const MEDICINE_LIST = [
-  "Paracetamol", "Diclofenac", "Ibuprofen", "Drotaverine", "Tramadol", 
-  "Ciprofloxacin", "Amoxicillin", "Nitrofurantoin", "Ceftriaxone", "Azithromycin", 
-  "Potassium Citrate", "Tamsulosin", "Sildenafil", "Prednisolone", "Furosemide (Lasix)", 
-  "Losartan", "Amlodipine", "Metformin", "Insulin", "Erythropoietin (EPO)", 
-  "Calcium Carbonate", "Vitamin C", "Vitamin B-Complex", "Iron Tablets", "Folic Acid"
-];
-
 export default function ConsultationActionPage() {
   const router = useRouter();
   const params = useParams();
@@ -46,6 +37,20 @@ export default function ConsultationActionPage() {
   const [ddiWarning, setDdiWarning] = useState<any>(null); // To store AI Warning
   const [overrideReason, setOverrideReason] = useState(""); //Override reason 
 
+  // 💊 Dynamic Medicine State
+  const [medicineCatalog, setMedicineCatalog] = useState<any[]>([]);
+
+  const fetchMedicineCatalog = async (token: string) => {
+    try {
+      const response = await axios.get("http://localhost:8000/medicines", {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setMedicineCatalog(response.data || []);
+    } catch (err) {
+      console.error("Failed to load medicine catalog");
+    }
+  };
+
   // System messages
   const [sysMessage, setSysMessage] = useState({ text: "", type: "" }); // type: "success" | "error"
 
@@ -58,6 +63,7 @@ export default function ConsultationActionPage() {
     fetchConsultationData(token);
     fetchLabCatalog(token);
     fetchActiveLabRequests(token);
+    fetchMedicineCatalog(token);
   }, [appointmentId, router]);
 
   // 1. Fetch Patient Info (From Dashboard Queue due to Clinical Blindness)
@@ -173,7 +179,7 @@ export default function ConsultationActionPage() {
         medicines: medicines,
         doctor_note: doctorNote,
         override_warning: override,
-        override_reason: overrideReason // <-- ADD THIS LINE
+        override_reason: overrideReason 
       }, {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -181,8 +187,8 @@ export default function ConsultationActionPage() {
       showToast("E-Prescription generated and securely sent to HealthVault.", "success");
       setMedicines([]);
       setDoctorNote("");
-      setOverrideReason(""); // <-- RESET REASON STATE
-      setDdiWarning(null);   // <-- CLOSE WARNING MODAL
+      setOverrideReason(""); 
+      setDdiWarning(null);   
 
     } catch (err: any) {
       if (err.response?.status === 400 && err.response?.data?.detail?.error_type === "DDI_WARNING") {
@@ -296,7 +302,6 @@ export default function ConsultationActionPage() {
               </div>
             </div>
 
-            {/* 🔴 NEW: Clinical Justification Textarea */}
             <div className="mb-6">
               <label className="block text-[10px] text-red-500 uppercase tracking-widest font-bold mb-2">
                 Clinical Justification for Override *
@@ -505,7 +510,11 @@ export default function ConsultationActionPage() {
                           className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-sky-500 appearance-none"
                         >
                           <option value="">-- Select Medicine --</option>
-                          {MEDICINE_LIST.map((name) => <option key={name} value={name}>{name}</option>)}
+                          {medicineCatalog.map((item, i) => (
+                            <option key={i} value={item.generic_name}>
+                              {item.generic_name} {item.brand_name ? `(${item.brand_name})` : ''}
+                            </option>
+                          ))}
                         </select>
                       </div>
                       

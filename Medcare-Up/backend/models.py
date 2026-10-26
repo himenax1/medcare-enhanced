@@ -307,3 +307,42 @@ class MedicineInventory(Base):
     unit_price = Column(Float, default=0.0)
     stock_quantity = Column(Integer, default=0)
     is_available = Column(Boolean, default=True)
+
+    # =========================================================
+# CLINICAL & HOSPITAL CONTROL MODELS (DDI, LAB CATALOG, BLOCKCHAIN)
+# =========================================================
+
+class DDIRule(Base):
+    __tablename__ = "ddi_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    drug_a = Column(String, nullable=False, index=True)
+    drug_b = Column(String, nullable=False, index=True)
+    rule_name = Column(String, nullable=False)
+    risk_level = Column(String, nullable=False)
+    details = Column(Text, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=get_lanka_time)
+
+
+class LabTestCatalog(Base):
+    __tablename__ = "lab_test_catalog"
+
+    id = Column(Integer, primary_key=True, index=True)
+    test_name = Column(String, unique=True, nullable=False)
+    price = Column(Float, nullable=False)
+    is_available = Column(Boolean, default=True)
+
+
+class BlockchainAuditLog(Base):
+    __tablename__ = "blockchain_audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_id = Column(Integer, nullable=False)
+    actor_role = Column(String, nullable=False)
+    action_type = Column(String, nullable=False)
+    data_hash = Column(String, nullable=False)
+    tx_id = Column(String, nullable=False)
+    details = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), default=get_lanka_time)
+    

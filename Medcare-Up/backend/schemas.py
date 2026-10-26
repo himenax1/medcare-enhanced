@@ -416,3 +416,48 @@ class PasswordChangeLoggedIn(BaseModel):
 class UsernameChangeRequest(BaseModel):
     current_password: str
     new_username: str
+
+    # =========================================================
+# DDI, LAB CATALOG & BLOCKCHAIN SCHEMAS
+# =========================================================
+
+class DDIRuleCreate(BaseModel):
+    drug_a: str
+    drug_b: str
+    rule_name: str
+    risk_level: str
+    details: str
+
+class DDIRuleResponse(DDIRuleCreate):
+    id: int
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class LabTestCatalogCreate(BaseModel):
+    test_name: str
+    price: float
+
+class LabTestCatalogResponse(LabTestCatalogCreate):
+    id: int
+    is_available: bool
+
+    class Config:
+        from_attributes = True
+
+
+class BlockchainLogResponse(BaseModel):
+    id: int
+    actor_id: int
+    actor_role: str
+    action_type: str
+    data_hash: str
+    tx_id: str
+    details: str
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True

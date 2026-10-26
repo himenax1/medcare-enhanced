@@ -135,7 +135,7 @@ export default function ProfileManagementPage() {
       </div>
 
       {/* 🟢 MAIN CONTENT */}
-      <div className="flex-1 flex flex-col h-screen overflow-y-auto p-8 md:p-12 max-w-4xl mx-auto relative">
+      <div className="flex-1 flex flex-col h-full overflow-y-auto p-8 md:p-12 pb-32 max-w-4xl mx-auto relative">
         <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-indigo-500/5 rounded-full blur-[120px] pointer-events-none"></div>
 
         <Link href="/dashboard/security" className="inline-flex items-center gap-2 text-slate-500 hover:text-indigo-400 mb-6 text-[10px] font-bold uppercase tracking-widest z-10 transition-colors">
